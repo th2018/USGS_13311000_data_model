@@ -1,0 +1,211 @@
+---
+title: "USGS_13311000"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Step 0: Load packages
+# Step 1: Load PRISM and USGS
+# Step 2: Model 1
+
+
+
+specify year and month for analysis
+# Step 6: Create the correlation plot
+# Step 7: create training and test data
+
+# Step 0: Load packages
+```{r include=FALSE}
+# install.packages("tidyhydat")
+#library(tidyhydat) # for getting ECCC HYDAT data
+# download_hydat()
+library(dplyr) # for data wrangling and pipelines
+library(ggplot2) # for modifying fasstr plots
+library("dplyr")
+#install.packages('corrplot')
+library(corrplot)
+library(RColorBrewer)
+# install.packages("gbm")
+library("gbm")
+# install.packages("caret")
+library("caret")
+#install.packages("pdp")
+library("pdp")          # model visualization
+library("ggplot2")      # model visualization
+#install.packages("lime")
+library("lime")         # model visualization
+library("pROC")
+#install.packages("e1071", repos="http://R-Forge.R-project.org")
+library("e1071")
+library( "MASS" )    #    used to generate correlated variables
+library("sp")
+library("Hmisc")    #   used for graphing se bars
+#install.packages("e1071")
+library(e1071)
+library(caret)
+library("ModelMetrics")
+library("foreign")
+#install.packages("rfUtilities")
+library("rfUtilities")
+library("lubridate")
+#  install.packages("feasts")
+library(feasts)
+library(tsibble)
+#  install.packages("TSstudio")
+library(TSstudio)
+library(plotly)
+# third approach
+library(tidyverse)
+# install.packages("timetk")
+library("timetk")
+```
+
+# Step 1: Load PRISM and USGS
+```{r}
+prism_df<-readRDS("prism_df_13311000.rds")
+summary(prism_df)
+```
+
+Check missing data
+```{r}
+table(prism_df[prism_df$mo  %in% c(6,7,8),]$yr)
+```
+
+Plot monthly temp
+```{r}
+prism_df2<-prism_df
+prism_df2$yr<-as.character(prism_df$yr)
+prism_df2$mo<-as.character(prism_df$mo)
+max_ST_yr<-prism_df2 %>% group_by( yr ,  mo  )%>% summarise(max_ST = max(mean_StreamTemp),mean_ST=mean(mean_StreamTemp) )
+max_ST_yr[max_ST_yr$mo %in% c("6",  "7" , "8"),]
+boxplot(max_ST_yr[max_ST_yr$mo %in% c("6",  "7" , "8"),]$mean_ST~max_ST_yr[max_ST_yr$mo %in% c("6",  "7" , "8"),]$mo, ylab = "Monthly mean stream T (degC)", xlab="Month", main="USGS EF OF SF SALMON RIVER AT STIBNITE, ID")
+```
+
+# Step 2: Model 1
+## site_id<- 13311000
+## Specify year and month for analysis: c(6,7,8)
+## Specify variables<-c("mean_StreamTemp" ,"log_mean_Q","doy","mean_AirTemperature_C" )
+```{r}
+site_id<- 13311000
+daily_df_summer<-prism_df[prism_df$mo %in% c(6,7,8),]
+# Create the correlation plot
+M <-cor( daily_df_summer[,c("mean_StreamTemp"
+                            ,"max_StreamTemp"      
+                        ,"log_mean_Q"
+                        ,"mean_AirTemperature_C"
+          ,"mean_AirTemperature_C_1"
+          ,"max_AirTemperature_C_1"
+     ,"max_AirTemperature_C"
+     ,"vpdmax"
+     ,"doy")])
+
+variables<-c("mean_StreamTemp" ,"log_mean_Q","doy","mean_AirTemperature_C" )
+v<-"Q_d_T"
+  
+M_1 <-cor( daily_df_summer[, variables ])
+corrplot(M_1, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"))
+
+# set seed for generating random data.
+set.seed(0)
+# createDataPartition() function from the caret package to split the original dataset into a training and testing set and split data into training (80%) and testing set (20%)
+parts = createDataPartition(  daily_df_summer$mean_StreamTemp , p = .8, list = F)
+train = daily_df_summer[parts, variables ]
+test =  daily_df_summer[-parts, variables  ]
+# feature and target array
+test_x = test[, -1] 
+test_y = test[, 1] 
+
+model_gbm = gbm(train$mean_StreamTemp      ~.,
+                data = train,
+                distribution = "gaussian",
+                cv.folds = 10,
+                shrinkage = .01,
+                n.minobsinnode = 10,
+                n.trees = 800)
+# model performance
+perf_gbm1 = gbm.perf( model_gbm, method = "cv")
+rinf<-summary(model_gbm)
+rinf$max_yr<-max(as.numeric(daily_df_summer$yr))
+rinf$min_yr<-min(as.numeric(daily_df_summer$yr))
+rinf$max_mo<-max(as.numeric(daily_df_summer$mo))
+rinf$min_mo<-min(as.numeric(daily_df_summer$mo))
+rinf$site_id<- site_id
+rinf
+saveRDS(rinf ,file=   paste("rinf",site_id,rinf$min_mo[1],rinf$max_mo[1],v,".rds",sep="_")  )
+
+rinf$var<- factor(rinf$var, levels=c(  variables[-1]  ))
+ggplot( rinf )+  geom_bar(  aes( x=var, y= rel.inf),  stat = "summary")+ scale_x_discrete(labels=  variables[-1] )+ylab("Relative importance (%)") +xlab(" ")  + theme(text=element_text(size=16))
+
+#test_y <-test_y$max_StreamTemp
+pred_y = predict.gbm(model_gbm, test_x)
+residuals =  test_y   - pred_y
+xlim=c(min(test_y)-5,max(test_y)+5)
+RMSE = sqrt(mean(residuals^2))
+cat('The root mean square error of the test data is ', round(RMSE,3),'\n')
+y_test_mean = mean( test_y  )
+# Calculate total sum of squares
+tss =  sum(( test_y   - y_test_mean)^2 )
+# Calculate residual sum of squares
+rss =  sum(residuals^2)
+# Calculate R-squared
+rsq  =  1 - (rss/tss)
+cat('The R-square of the test data is ', round(rsq,3), '\n')
+plot(  test_y , pred_y,xlim= xlim ,ylim= xlim, xlab="Observed stream temperature (degC)", ylab="Predicted stream temperature (degC)", main="EF OF SF SALMON RIVER AT STIBNITE, ID")
+par(new=T)
+x=c(min(test_y)-10,max(test_y)+10)
+plot(x,x,type="l",xlim= xlim ,ylim= xlim,xlab="",ylab="")
+
+length(variables)
+
+model_gbm %>%
+  pdp::partial(pred.var =  variables[2], n.trees = model_gbm$n.trees, grid.resolution = 100)%>%
+  autoplot(rug = TRUE, train = train)+theme(axis.text=element_text(size=21),
+        axis.title=element_text(size=24))
+
+model_gbm %>%
+  pdp::partial(pred.var =  variables[3], n.trees = model_gbm$n.trees, grid.resolution = 100)%>%
+  autoplot(rug = TRUE, train = train)+theme(axis.text=element_text(size=21),
+        axis.title=element_text(size=24))
+
+model_gbm %>%
+  pdp::partial(pred.var =  variables[4], n.trees = model_gbm$n.trees, grid.resolution = 100)%>%
+  autoplot(rug = TRUE, train = train)+theme(axis.text=element_text(size=21),
+        axis.title=element_text(size=24))
+
+unique(daily_df_summer$yr)
+yr=2022
+ts <- ts(data = daily_df_summer[daily_df_summer$yr ==yr, c( "mean_AirTemperature_C",  "mean_StreamTemp" )],  
+   start = 1,
+   end =  dim(daily_df_summer[daily_df_summer$yr ==yr, ])[1],
+   frequency = 1)
+ts_plot( ts,
+        title = "EF OF SF SALMON RIVER AT STIBNITE, ID",
+        Ytitle =    "mean StreamTemp",
+        Xtitle = " ", )
+
+# ccf time series
+par(mfrow=c(1,1))
+ccf( ts[, c( "mean_AirTemperature_C")],  ts[, c( "mean_StreamTemp")], 
+    lag.max = 11,
+    main = "Cros-Correlation Plot",
+    ylab = "CCF")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
